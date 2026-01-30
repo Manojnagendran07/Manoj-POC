@@ -1,0 +1,49 @@
+yaml
+name: CI/CD Pipeline
+
+# Trigger the workflow on push events to the 'dev' branch
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  build:
+    # Specify the environment to run the job
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the code from the repository
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Step 2: Set up Azure CLI
+      - name: Set up Azure CLI
+        run: |
+          # Install Azure CLI on the runner
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          # Verify the installation by checking the version
+          az --version
+
+      # Step 3: Authenticate Azure CLI using a service principal
+      - name: Authenticate Azure CLI
+        env:
+          # Use GitHub secrets to securely pass Azure credentials
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          # Log in to Azure using the service principal credentials
+          az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+
+      # Step 4: Create a dummy file in the production directory
+      - name: Create dummy file in prod
+        run: |
+          # Create a dummy file with a simple message in the 'prod' directory
+          echo "This is a dummy file for production." > prod/dummy_file.txt
+
+      # Step 5: Move the YAML workflow file from 'dev' to 'prod'
+      - name: Move YAML file from dev to prod
+        run: |
+          # Move the CI/CD pipeline YAML file to the 'prod' directory
+          mv .github/workflows/ci-cd-pipeline.yml prod/ci-cd-pipeline.yml
