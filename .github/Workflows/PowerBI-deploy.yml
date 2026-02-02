@@ -1,0 +1,58 @@
+name: Deploy Power BI Report
+
+on:
+  push:
+    branches:
+      - feature
+      - main
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    steps:
+      # Step 1: Install pbicli globally
+      - name: Install pbicli
+        run: npm install -g @powerbi-cli/powerbi-cli
+
+      # Step 2: Checkout repository (with LFS if needed)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      # Step 3: Determine workspace ID based on branch
+      - name: Set Workspace ID
+        id: set_workspace
+        run: |
+          $branch = "${{ github.ref_name }}"
+          if ($branch -eq "main") {
+            $wsId = "${{ vars.PRODWORKSPACEID }}"
+          } elseif ($branch -eq "feature") {
+            $wsId = "${{ vars.DEVWORKSPACEID }}"
+          } else {
+            Write-Host "##[error]Unsupported branch: $branch"
+            exit 1
+          }
+          if ([string]::IsNullOrEmpty($wsId)) {
+            Write-Host "##[error]Workspace ID not configured for branch '$branch'"
+            exit 1
+          }
+          Write-Host "workspace_id=$wsId" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      # Step 4: Authenticate to Power BI using service principal
+      - name: Authenticate with Power BI
+        run: |
+          pbicli login --service-principal --principal "${{ vars.CLIENT_ID }}" --secret "${{ secrets.CLIENT_SECRET }}" --tenant "${{ vars.TENANT_ID }}"
+        shell: pwsh
+
+      # Step 5: Publish the PBIX file
+      - name: Publish SampleReport.pbix
+        run: |
+          $file = "Reports/SampleReport.pbix"
+          if (-not (Test-Path $file)) {
+            Write-Host "##[error]File not found: $file"
+            exit 1
+          }
+          pbicli import pbix --workspace "${{ steps.set_workspace.outputs.workspace_id }}" --file "$file" --conflict CreateOrOverwrite
+        shell: pwsh
