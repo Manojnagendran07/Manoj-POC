@@ -1,0 +1,50 @@
+trigger:
+  branches:
+    include:
+      - dev
+      - main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  CLIENT_ID: $(CLIENT_ID)
+  CLIENT_SECRET: $(CLIENT_SECRET)
+  TENANT_ID: $(TENANT_ID)
+  devWorkspaceId: $(devWorkspaceId)
+  prodWorkspaceId: $(prodWorkspaceId)
+
+steps:
+- checkout: self
+
+- powershell: |
+    if ("$(Build.SourceBranchName)" -eq "dev") {
+      echo "##vso[task.setvariable variable=TARGET_WS]$(devWorkspaceId)"
+    } else {
+      echo "##vso[task.setvariable variable=TARGET_WS]$(prodWorkspaceId)"
+    }
+  displayName: 'SetBranch → Workspace'
+
+- powershell: |
+    $file = Get-ChildItem -Recurse -Filter *.pbix | Select-Object -First 1
+    $token = (Invoke-RestMethod `
+      -Uri "https://login.microsoftonline.com/$(TENANT_ID)/oauth2/token" `
+      -Method Post `
+      -Body @{
+        grant_type = "client_credentials"
+        client_id = "$(CLIENT_ID)"
+        client_secret = "$(CLIENT_SECRET)"
+        resource = "https://analysis.windows.net/powerbi/api"
+      }).access_token
+
+    Invoke-RestMethod `
+      -Uri "https://api.powerbi.com/v1.0/myorg/groups/$(TARGET_WS)/imports?datasetDisplayName=$($file.BaseName)&name=$($file.BaseName)" `
+      -Method Post `
+      -Headers @{ Authorization = "Bearer $token" } `
+      -InFile $file.FullName `
+      -ContentType "multipart/form-data"
+  displayName: '🚀 Deploy to Power BI'
+  env:
+    CLIENT_ID: $(CLIENT_ID)
+    CLIENT_SECRET: $(CLIENT_SECRET)
+    TENANT_ID: $(TENANT_ID)
