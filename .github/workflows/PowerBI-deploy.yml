@@ -39,8 +39,17 @@ jobs:
           Write-Host "npm global prefix: $npmPrefix"
           $npmPrefix | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-          # Verify pbicli is available
-          pbicli --version
+          # Verify pbicli is on PATH (Get-Command returns the path if found)
+          $pbicliCmd = Get-Command pbicli -ErrorAction SilentlyContinue
+          if (-not $pbicliCmd) {
+            Write-Host "PATH: $env:PATH"
+            Write-Host "Contents of npm prefix:"
+            Get-ChildItem -Force $npmPrefix | Select-Object FullName, Length
+            throw "pbicli not found on PATH after installation."
+          }
+          Write-Host "pbicli located at: $($pbicliCmd.Source)"
+          # Use a harmless help call instead of unsupported '--version'
+          pbicli -h | Out-Null
 
       - name: Validate PBIX exists
         shell: pwsh
