@@ -1,136 +1,140 @@
-name: Power BI Deploy (Main Branch)
+name: Deploy Power BI (Prod)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+    # Run only when the PBIX changes (remove this 'paths' block to run on ANY change to main)
+    paths:
+      - 'Reports/Samplereport.pbix'
+  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout repository + LFS
+      - name: Checkout (with Git LFS)
         uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Setup Node.js (for pbicli)
+      - name: Setup Node.js (LTS)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install pbicli globally
-        run: npm install -g @powerbi-cli/powerbi-cli
-
-      - name: Authenticate with Power BI (Service Principal)
+      - name: Install pbicli and add to PATH
+        shell: pwsh
         run: |
-          pbicli login --service-principal \
-            --principal "${{ secrets.CLIENT_ID }}" \
-            --secret "${{ secrets.CLIENT_SECRET }}" \
-            --tenant "${{ secrets.TENANT_ID }}"
+          $ErrorActionPreference = 'Stop'
+          npm -v
+          node -v
+          npm install -g @powerbi-cli/powerbi-cli
 
-      - name: Set Production Workspace ID
-        run: |
-          if [ -z "${{ secrets.PROD_WORKSPACE_ID }}" ]; then
-            echo "Error: Secret PROD_WORKSPACE_ID is not set or empty" >&2
+          # Add global npm bin to PATH for subsequent steps
+          $npmPrefix = npm config get prefix
+          if (-not (Test-Path $npmPrefix)) {
+            Write-Error "Unable to locate npm global prefix."
             exit 1
-          fi
-          echo "WORKSPACE_ID=${{ secrets.PROD_WORKSPACE_ID }}" >> $GITHUB_ENV
-          echo "Using Production Workspace ID: ${{ secrets.PROD_WORKSPACE_ID }}"
+          }
+          Write-Host "npm global prefix: $npmPrefix"
+          # On Windows, pbicli(.cmd) is directly inside prefix (e.g., %APPDATA%\npm)
+          $globalBin = $npmPrefix
+          $globalBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Find PBIX file
+          pbicli --version
+
+      - name: Validate PBIX exists
+        shell: pwsh
         run: |
-          pbix_file="Reports/Samplereport.pbix"
-          if [ ! -f "$pbix_file" ]; then
-            echo "Error: PBIX file not found at $pbix_file" >&2
+          $path = "Reports/Samplereport.pbix"
+          if (-not (Test-Path $path)) {
+            Write-Host "Working directory: $(Get-Location)"
+            Write-Host "Listing repo to help diagnose:"
+            Get-ChildItem -Recurse -Force | Select-Object FullName
+            Write-Error "PBIX not found at '$path'. Check the file path and ensure LFS is fetching the file."
             exit 1
-          fi
-          echo "pbix_files=$pbix_file" >> $GITHUB_ENV
-          echo "Found PBIX file: $pbix_file"
+          }
+          $size = (Get-Item $path).Length
+          Write-Host "Found PBIX at '$path' ($([Math]::Round($size/1MB,2)) MB)."
 
-      - name: Rename PBIX file (reponame-reportname.pbix)
+      - name: Authenticate to Power BI (Service Principal)
+        shell: pwsh
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
         run: |
-          file="${pbix_files}"
-          dir=$(dirname "$file")
-          base=$(basename "$file" .pbix)
-          new_name="${{ github.event.repository.name }}-${base}.pbix"
-          new_path="$dir/$new_name"
-          mv "$file" "$new_path"
-          echo "Renamed: $file → $new_path"
-          echo "pbix_files=$new_path" >> $GITHUB_ENV
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) -or
+              [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET) -or
+              [string]::IsNullOrWhiteSpace($env:TENANT_ID)) {
+            Write-Error "CLIENT_ID/CLIENT_SECRET/TENANT_ID secrets are missing."
+            exit 1
+          }
+          pbicli login --service-principal --principal $env:CLIENT_ID --secret $env:CLIENT_SECRET --tenant $env:TENANT_ID
+          Write-Host "Authenticated to Power BI."
 
-      - name: List existing reports and datasets in workspace
+      - name: Publish PBIX to Power BI (CreateOrOverwrite)
+        shell: pwsh
+        env:
+          PROD_WORKSPACE_ID: ${{ secrets.PROD_WORKSPACE_ID }}
         run: |
-          reports_json=$(pbicli report list --workspace "$WORKSPACE_ID" --output json)
-          reports=$(echo "$reports_json" | jq -r '.[]?.name // empty' | tr '\n' ';')
-          echo "reports=$reports" >> $GITHUB_ENV
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:PROD_WORKSPACE_ID)) {
+            Write-Error "Secret PROD_WORKSPACE_ID is not set."
+            exit 1
+          }
+          $ws = $env:PROD_WORKSPACE_ID
+          $file = "Reports/Samplereport.pbix"
+          Write-Host "Publishing '$file' to workspace '$ws'..."
+          pbicli import pbix -w "$ws" --file "$file" --conflict CreateOrOverwrite
+          Write-Host "Publish completed."
 
-          datasets_json=$(pbicli dataset list --workspace "$WORKSPACE_ID" --output json)
-          datasets=$(echo "$datasets_json" | jq -r '.[]?.name // empty' | tr '\n' ';')
-          echo "datasets=$datasets" >> $GITHUB_ENV
-
-          echo "Reports in workspace:"
-          echo "${reports:-None}" | tr ';' '\n'
-          echo "Datasets in workspace:"
-          echo "${datasets:-None}" | tr ';' '\n'
-
-      - name: Publish PBIX file
+      # Optional: rebind if you use federated/composite model mapping in federated-model.txt
+      - name: (Optional) Rebind reports from federated-model.txt
+        shell: pwsh
+        env:
+          PROD_WORKSPACE_ID: ${{ secrets.PROD_WORKSPACE_ID }}
         run: |
-          echo "Publishing: $pbix_files"
-          pbicli import pbix -w "$WORKSPACE_ID" --file "$pbix_files" --conflict CreateOrOverwrite
+          $ErrorActionPreference = 'Stop'
+          $federatedModelFile = Join-Path $env:GITHUB_WORKSPACE "federated-model.txt"
+          if (-not (Test-Path $federatedModelFile)) {
+            Write-Host "federated-model.txt not found. Skipping rebind."
+            exit 0
+          }
 
-      - name: Delete orphaned reports and datasets
-        run: |
-          repo_prefix="${{ github.event.repository.name }}-"
-          pbix_name=$(basename "$pbix_files" .pbix)
+          Write-Host "Reading binding rules from federated-model.txt..."
+          $bindings = Get-Content $federatedModelFile |
+                      Select-Object -Skip 1 |
+                      Where-Object { $_ -match "^\s*[^#]" } |
+                      ForEach-Object {
+                        if ($_ -match "^(.+?)\s*:\s*(.+)$") {
+                          [PSCustomObject]@{ Report = $matches[1].Trim(); Dataset = $matches[2].Trim() }
+                        }
+                      }
 
-          # Orphaned reports
-          echo "$reports" | tr ';' '\n' | while IFS= read -r report; do
-            if [ -z "$report" ] || [[ ! "$report" == "$repo_prefix"* ]]; then continue; fi
-            if [ "$report" != "$pbix_name" ]; then
-              echo "Deleting orphaned report: $report"
-              pbicli report delete --workspace "$WORKSPACE_ID" --report "$report" || true
-            fi
-          done
+          if (-not $bindings -or $bindings.Count -eq 0) {
+            Write-Host "No valid binding rules found. Skipping rebind."
+            exit 0
+          }
 
-          # Orphaned datasets
-          echo "$datasets" | tr ';' '\n' | while IFS= read -r ds; do
-            if [ -z "$ds" ] || [[ ! "$ds" == "$repo_prefix"* ]]; then continue; fi
-            if [ "$ds" != "$pbix_name" ]; then
-              echo "Deleting orphaned dataset: $ds"
-              pbicli dataset delete --workspace "$WORKSPACE_ID" --dataset "$ds" || true
-            fi
-          done
+          $workspaceId = $env:PROD_WORKSPACE_ID
+          $reportList  = (pbicli report list  --workspace "$workspaceId" --output json | ConvertFrom-Json)
+          $datasetList = (pbicli dataset list --workspace "$workspaceId" --output json | ConvertFrom-Json)
 
-      - name: Rebind reports (if federated-model.txt exists)
-        if: hashFiles('federated-model.txt') != ''
-        run: |
-          repo_prefix="${{ github.event.repository.name }}-"
+          $reportByName  = @{}
+          foreach ($r in $reportList)  { $reportByName[$r.name] = $r.id }
 
-          # Parse bindings (skip header, ignore comments)
-          mapfile -t bindings < <(tail -n +2 federated-model.txt | grep -vE '^\s*(#|$)' | grep -E '^\s*[^:]+:[^:]+$')
+          $datasetByName = @{}
+          foreach ($d in $datasetList) { $datasetByName[$d.name] = $d.id }
 
-          # Build dataset name → id map
-          declare -A dataset_map
-          while IFS= read -r line; do
-            name=$(echo "$line" | jq -r '.name')
-            id=$(echo "$line" | jq -r '.id')
-            dataset_map["$name"]="$id"
-          done < <(pbicli dataset list --workspace "$WORKSPACE_ID" --output json | jq -c '.[]')
-
-          for line in "${bindings[@]}"; do
-            report_raw=$(echo "$line" | cut -d':' -f1 | xargs)
-            dataset_raw=$(echo "$line" | cut -d':' -f2- | xargs)
-            report_name="${repo_prefix}${report_raw}"
-            dataset_name="${repo_prefix}${dataset_raw}"
-
-            if [ -z "${dataset_map[$dataset_name]}" ]; then
-              echo "Error: Dataset '$dataset_name' not found. Skipping rebind."
-              continue
-            fi
-
-            dataset_id="${dataset_map[$dataset_name]}"
-            echo "Rebinding '$report_name' → '$dataset_name' (ID: $dataset_id)"
-            pbicli report rebind --workspace "$WORKSPACE_ID" --report "$report_name" --target-dataset "$dataset_id" || echo "Rebind failed (may already be bound)"
-          done
+          foreach ($b in $bindings) {
+            if (-not $reportByName.ContainsKey($b.Report))  { Write-Host "Report '$($b.Report)' not found; skipping.";  continue }
+            if (-not $datasetByName.ContainsKey($b.Dataset)) { Write-Host "Dataset '$($b.Dataset)' not found; skipping."; continue }
+            $rid = $reportByName[$b.Report]
+            $did = $datasetByName[$b.Dataset]
+            Write-Host "Rebinding report '$($b.Report)' ($rid) -> dataset '$($b.Dataset)' ($did)"
+            pbicli report rebind --workspace "$workspaceId" --report "$rid" --target-dataset "$did"
+          }
+          Write-Host "Rebind step completed." 
