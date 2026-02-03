@@ -1,145 +1,78 @@
-name: Deploy Power BI (Prod)
+name: Power BI CI/CD Deployment
 
 on:
   push:
-    branches: [ main ]        # Adjust if your default is 'master'
-  workflow_dispatch:
+    branches:
+      - main   # ✅ Trigger only on main branch
 
 jobs:
-  deploy:
+  deploy-pbix:
     runs-on: windows-latest
 
     env:
-      PBI_FILE: Reports/Samplereport.pbix
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+      TENANT_ID: ${{ secrets.TENANT_ID }}
+      DEV_WORKSPACE_ID: ${{ secrets.DEVWORKSPACEID }}
+      PROD_WORKSPACE_ID: ${{ secrets.PROD_WORKSPACE_ID }}
 
     steps:
-      - name: Checkout (with Git LFS)
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Setup Node.js (LTS)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install pbicli and add global npm to PATH
-        shell: pwsh
+      - name: Install Modern Power BI CLI
         run: |
-          $ErrorActionPreference = 'Stop'
-          npm -v
-          node -v
-
-          # Install Power BI CLI
+          npm uninstall -g powerbi-cli
           npm install -g @powerbi-cli/powerbi-cli
+          pbicli version
+        shell: powershell
 
-          # Add npm global prefix to PATH so pbicli is accessible in subsequent steps
-          $npmPrefix = npm config get prefix
-          if (-not (Test-Path $npmPrefix)) { throw "Unable to locate npm global prefix: $npmPrefix" }
-          Write-Host "npm global prefix: $npmPrefix"
-          $npmPrefix | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Verify pbicli is on PATH (Get-Command returns the path if found)
-          $pbicliCmd = Get-Command pbicli -ErrorAction SilentlyContinue
-          if (-not $pbicliCmd) {
-            Write-Host "PATH: $env:PATH"
-            Write-Host "Contents of npm prefix:"
-            Get-ChildItem -Force $npmPrefix | Select-Object FullName, Length
-            throw "pbicli not found on PATH after installation."
-          }
-          Write-Host "pbicli located at: $($pbicliCmd.Source)"
-          # Use a harmless help call instead of unsupported '--version'
-          pbicli -h | Out-Null
-
-      - name: Validate PBIX exists
-        shell: pwsh
+      - name: Prepare PBIX Files
         run: |
-          $ErrorActionPreference = 'Stop'
-          $path = "$env:PBI_FILE"
-          if (-not (Test-Path $path)) {
-            Write-Host "Working directory: $(Get-Location)"
-            Write-Host "Listing repo to help diagnose:"
-            Get-ChildItem -Recurse -Force | Select-Object FullName
-            throw "PBIX not found at '$path'. Check the file path and ensure LFS fetched the file."
+          $absPath = "${{ github.workspace }}\pbix-temp"
+          if (-not (Test-Path $absPath)) { New-Item -ItemType Directory -Path $absPath -Force }
+          $allFiles = Get-ChildItem -Path "${{ github.workspace }}" -Filter *.pbix -Recurse
+          foreach ($file in $allFiles) {
+              $cleanName = ($file.BaseName -replace '[^a-zA-Z0-9]', '') + ".pbix"
+              Copy-Item -Path $file.FullName -Destination (Join-Path $absPath $cleanName) -Force
           }
-          $size = (Get-Item $path).Length
-          Write-Host "Found PBIX at '$path' ($([Math]::Round($size/1MB,2)) MB)."
+        shell: powershell
 
-      - name: Authenticate to Power BI (Service Principal)
-        shell: pwsh
-        env:
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-          TENANT_ID: ${{ secrets.TENANT_ID }}
+      - name: Login to Power BI
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:CLIENT_ID) -or
-              [string]::IsNullOrWhiteSpace($env:CLIENT_SECRET) -or
-              [string]::IsNullOrWhiteSpace($env:TENANT_ID)) {
-            throw "CLIENT_ID/CLIENT_SECRET/TENANT_ID secrets are missing."
-          }
-          pbicli login --service-principal --principal $env:CLIENT_ID --secret $env:CLIENT_SECRET --tenant $env:TENANT_ID
-          Write-Host "Authenticated to Power BI."
+          pbicli login --service-principal `
+            --principal "${{ env.CLIENT_ID }}" `
+            --secret "${{ env.CLIENT_SECRET }}" `
+            --tenant "${{ env.TENANT_ID }}"
+        shell: powershell
 
-      - name: Publish PBIX to Power BI (CreateOrOverwrite)
-        shell: pwsh
-        env:
-          PROD_WORKSPACE_ID: ${{ secrets.PROD_WORKSPACE_ID }}
+      - name: Deploy to Power BI Workspace Root
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:PROD_WORKSPACE_ID)) {
-            throw "Secret PROD_WORKSPACE_ID is not set."
-          }
-          $ws = $env:PROD_WORKSPACE_ID
-          $file = "$env:PBI_FILE"
-          Write-Host "Publishing '$file' to workspace '$ws'..."
-          pbicli import pbix -w "$ws" --file "$file" --conflict CreateOrOverwrite
-          Write-Host "Publish completed."
+          $branch = "${{ github.ref_name }}"
+          $absPath = "${{ github.workspace }}\pbix-temp"
 
-      # Optional: rebind using federated-model.txt (if you use composite/federated models)
-      - name: (Optional) Rebind reports from federated-model.txt
-        shell: pwsh
-        env:
-          PROD_WORKSPACE_ID: ${{ secrets.PROD_WORKSPACE_ID }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $federatedModelFile = Join-Path $env:GITHUB_WORKSPACE "federated-model.txt"
-          if (-not (Test-Path $federatedModelFile)) {
-            Write-Host "federated-model.txt not found. Skipping rebind."
-            exit 0
+          # Since we only trigger on main, you can decide which workspace to use.
+          # Example: deploy to PROD only
+          $workspaceId = "${{ env.PROD_WORKSPACE_ID }}"
+
+          $filesToDeploy = Get-ChildItem -Path "$absPath\*.pbix"
+
+          if ($filesToDeploy.Count -eq 0) {
+              Write-Error "No .pbix files found in $absPath to deploy!"
+              exit 1
           }
 
-          Write-Host "Reading binding rules from federated-model.txt..."
-          $bindings = Get-Content $federatedModelFile |
-                      Select-Object -Skip 1 |
-                      Where-Object { $_ -match "^\s*[^#]" } |
-                      ForEach-Object {
-                        if ($_ -match "^(.+?)\s*:\s*(.+)$") {
-                          [PSCustomObject]@{ Report = $matches[1].Trim(); Dataset = $matches[2].Trim() }
-                        }
-                      }
+          foreach ($file in $filesToDeploy) {
+              Write-Host "----------------------------------------------"
+              Write-Host "Target Workspace: $workspaceId (Branch: $branch)"
+              Write-Host "Deploying File: $($file.Name)"
 
-          if (-not $bindings -or $bindings.Count -eq 0) {
-            Write-Host "No valid binding rules found. Skipping rebind."
-            exit 0
+              pbicli import pbix `
+                --workspace "$workspaceId" `
+                --file "$($file.FullName)" `
+                --name "$($file.BaseName)" `
+                --conflict CreateOrOverwrite
+
+              Write-Host "Successfully deployed $($file.Name) to the workspace root."
           }
-
-          $workspaceId = $env:PROD_WORKSPACE_ID
-          $reportList  = (pbicli report list  --workspace "$workspaceId" --output json | ConvertFrom-Json)
-          $datasetList = (pbicli dataset list --workspace "$workspaceId" --output json | ConvertFrom-Json)
-
-          $reportByName  = @{}
-          foreach ($r in $reportList)  { $reportByName[$r.name] = $r.id }
-
-          $datasetByName = @{}
-          foreach ($d in $datasetList) { $datasetByName[$d.name] = $d.id }
-
-          foreach ($b in $bindings) {
-            if (-not $reportByName.ContainsKey($b.Report))  { Write-Host "Report '$($b.Report)' not found; skipping.";  continue }
-            if (-not $datasetByName.ContainsKey($b.Dataset)) { Write-Host "Dataset '$($b.Dataset)' not found; skipping."; continue }
-            $rid = $reportByName[$b.Report]
-            $did = $datasetByName[$b.Dataset]
-            Write-Host "Rebinding report '$($b.Report)' ($rid) -> dataset '$($b.Dataset)' ($did)"
-            pbicli report rebind --workspace "$workspaceId" --report "$rid" --target-dataset "$did"
-          }
-          Write-Host "Rebind step completed."
+        shell: powershell
