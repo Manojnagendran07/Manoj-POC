@@ -34,10 +34,10 @@ jobs:
       - name: Determine Workspace ID (Production)
         id: set-workspace
         run: |
-          $workspaceId = "${{ secrets.WORKSPACE_ID_PROD }}"
+          $workspaceId = "${{ vars.WORKSPACE_ID_PROD }}"
 
-          if ([string]::IsNullOrWhiteSpace($workspaceId)) {
-            Write-Error "WORKSPACE_ID_PROD secret is not set"
+          if (-not $workspaceId) {
+            Write-Error "WORKSPACE_ID_PROD repository variable is not set"
             exit 1
           }
 
@@ -207,3 +207,6 @@ jobs:
               Write-Error "Rebind failed: $_"
             }
             Write-Host "::endgroup::"
+          }
+        shell: pwsh
+ 
