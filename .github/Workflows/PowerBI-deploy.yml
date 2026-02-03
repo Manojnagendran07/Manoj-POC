@@ -5,76 +5,52 @@ on:
     branches:
       - main
       - dev
-
-  # Optional: keep manual trigger if you need to re-run manually sometimes
-  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
-    # Environment + secrets protection (optional but recommended for prod)
-    # Uncomment and create environments in repo settings if needed
-    # environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Example: Azure login using your repository secrets
-      # (uncomment/adapt based on what you actually need — e.g. az cli, Power Platform, etc.)
-      - name: Azure Login
-        if: always()  # or remove if not needed
+      - name: Azure Login  # Remove if not needed; this is for Azure auth if your deployment requires it
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.CLIENT_ID }}
           client-secret: ${{ secrets.CLIENT_SECRET }}
           tenant-id: ${{ secrets.TENANT_ID }}
 
-      # Example: If you need to use DEVWORKSPACEID (e.g. Power Platform / DevOps workspace)
-      - name: Show workspace ID (example)
+      - name: Set Workspace ID
         run: |
-          echo "Using Dev Workspace ID: ${{ secrets.DEVWORKSPACEID }}"
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            WORKSPACE_ID=${{ secrets.PRODWORKSPACEID }}  # Use prod secret for main
+            echo "Using Production Workspace ID"
+          else
+            WORKSPACE_ID=${{ secrets.DEVWORKSPACEID }}  # Use dev secret for other branches
+            echo "Using Dev Workspace ID"
+          fi
+          echo "WORKSPACE_ID=$WORKSPACE_ID" >> $GITHUB_ENV  # Make it available to later steps
 
-      # ────────────────────────────────────────────────
-      #   ← Replace these placeholder steps with your real build / test / deploy commands →
-      # ────────────────────────────────────────────────
-      - name: Setup your environment (example)
-        run: |
-          echo "Install dependencies, build your app here..."
-          # npm ci
-          # dotnet restore
-          # etc.
-
+      # Add your actual build, test, deploy steps here
       - name: Build
         run: |
-          echo "Building the project..."
-          # npm run build
-          # dotnet build
-          # etc.
+          echo "Building for branch: ${{ github.ref_name }}"
+          # Your build commands, e.g., npm build or whatever your project uses
 
       - name: Test
         run: |
           echo "Running tests..."
-          # npm test
-          # dotnet test
-          # etc.
+          # Your test commands, e.g., npm test
 
-      - name: Deploy to ${{ github.ref_name == 'main' && 'Production' || 'Dev/Staging' }}
+      - name: Deploy
         run: |
-          echo "Deploying to ${{ github.ref_name }} branch environment..."
-          echo "Using CLIENT_ID = ${{ secrets.CLIENT_ID }}"
-          echo "Using TENANT_ID = ${{ secrets.TENANT_ID }}"
-          echo "Using DEVWORKSPACEID = ${{ secrets.DEVWORKSPACEID }}"
-          
-          # Your real deployment commands here, examples:
-          # az deployment group create --resource-group my-rg ...
-          # pac auth create --url https://... --clientid ${{ secrets.CLIENT_ID }} ...
-          # npm run deploy
-          # etc.
-
-      # Optional: Notify or cleanup
-      - name: Workflow summary
-        if: always()
-        run: |
-          echo "Workflow finished for ${{ github.ref_name }} (commit: ${{ github.sha }})"
+          echo "Deploying to ${{ github.ref_name == 'main' && 'Production' || 'Dev/Staging' }} with Workspace ID: $WORKSPACE_ID"
+          # Your deployment commands, e.g.:
+          # az deployment group create --resource-group myGroup --template-file template.json --parameters workspaceId=$WORKSPACE_ID
+          # Adapt based on your tool (Azure DevOps, Power Apps, etc.)
