@@ -1,177 +1,136 @@
-trigger:
-  branches:
-    include:
-      - main  # Only production/main branch
+name: Power BI Deploy (Main Branch)
 
-pool:
-  vmImage: 'windows-latest'
+on:
+  push:
+    branches:
+      - main
 
-steps:
-  # Step 0: Install pbicli globally
-  - script: |
-      npm install -g @powerbi-cli/powerbi-cli
-    displayName: 'Install pbicli'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
 
-  # Step 1: Checkout repository + Git LFS
-  - checkout: self
-    lfs: true
+    steps:
+      - name: Checkout repository + LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
 
-  # Step 2: Authenticate with Power BI using service principal
-  - powershell: |
-      pbicli login --service-principal --principal $(CLIENT_ID) --secret $(CLIENT_SECRET) --tenant $(TENANT_ID)
-    displayName: 'Authenticate with Power BI'
-    env:
-      CLIENT_ID: $(CLIENT_ID)
-      CLIENT_SECRET: $(CLIENT_SECRET)
-      TENANT_ID: $(TENANT_ID)
+      - name: Setup Node.js (for pbicli)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-  # Step 3: Set the (single) production workspace ID
-  - powershell: |
-      $workspaceId = "$(PRODWORKSPACEID)"
-      if ([string]::IsNullOrEmpty($workspaceId)) {
-        Write-Host "##[error]PRODWORKSPACEID variable/secret is empty or not set."
-        exit 1
-      }
-      Write-Host "##vso[task.setvariable variable=workspaceId]$workspaceId"
-      Write-Host "##[info]Using Production Workspace ID: $workspaceId"
-    displayName: 'Set Production Workspace ID'
+      - name: Install pbicli globally
+        run: npm install -g @powerbi-cli/powerbi-cli
 
-  # Step 4: Find all .pbix files
-  - powershell: |
-      $pbixFiles = Get-ChildItem -Path . -Recurse -Filter *.pbix | Select-Object -ExpandProperty FullName
-      if ($pbixFiles.Count -eq 0) {
-        Write-Host "##[warning]No .pbix files found in the repository."
-      } else {
-        Write-Host "##[section]Found PBIX files:"
-        $pbixFiles | ForEach-Object { Write-Host $_ }
-      }
-      Write-Host "##vso[task.setvariable variable=pbixFiles]$($pbixFiles -join ';')"
-    displayName: 'List PBIX Files'
+      - name: Authenticate with Power BI (Service Principal)
+        run: |
+          pbicli login --service-principal \
+            --principal "${{ secrets.CLIENT_ID }}" \
+            --secret "${{ secrets.CLIENT_SECRET }}" \
+            --tenant "${{ secrets.TENANT_ID }}"
 
-  # Step 5: Rename .pbix files to reponame-reportname.pbix
-  - powershell: |
-      $repoName = "$(Build.Repository.Name)"
-      $pbixFiles = "$(pbixFiles)"
-      if (-not $pbixFiles) {
-        Write-Host "##[warning]No PBIX files to rename. Skipping."
-        exit 0
-      }
-      $pbixFilesArray = $pbixFiles -split ';'
-      $renamedFiles = @()
-      foreach ($file in $pbixFilesArray) {
-        $fileName = [System.IO.Path]::GetFileNameWithoutExtension($file)
-        $newFileName = "$repoName-$fileName.pbix"
-        $newFilePath = Join-Path ([System.IO.Path]::GetDirectoryName($file)) $newFileName
-        Rename-Item -Path $file -NewName $newFileName -Force
-        Write-Host "##[info]Renamed: $file → $newFilePath"
-        $renamedFiles += $newFilePath
-      }
-      Write-Host "##vso[task.setvariable variable=pbixFiles]$($renamedFiles -join ';')"
-    displayName: 'Rename PBIX Files'
+      - name: Set Production Workspace ID
+        run: |
+          if [ -z "${{ secrets.PROD_WORKSPACE_ID }}" ]; then
+            echo "Error: Secret PROD_WORKSPACE_ID is not set or empty" >&2
+            exit 1
+          fi
+          echo "WORKSPACE_ID=${{ secrets.PROD_WORKSPACE_ID }}" >> $GITHUB_ENV
+          echo "Using Production Workspace ID: ${{ secrets.PROD_WORKSPACE_ID }}"
 
-  # Step 6: Get existing reports & datasets in workspace
-  - powershell: |
-      $workspaceId = "$(workspaceId)"
-      $reportsJson = pbicli report list --workspace $workspaceId --output json
-      $reports = ($reportsJson | ConvertFrom-Json).name
-      Write-Host "##[section]Reports in workspace:"
-      if ($reports) { $reports | ForEach-Object { Write-Host $_ } } else { Write-Host "None" }
+      - name: Find PBIX file
+        run: |
+          pbix_file="Reports/Samplereport.pbix"
+          if [ ! -f "$pbix_file" ]; then
+            echo "Error: PBIX file not found at $pbix_file" >&2
+            exit 1
+          fi
+          echo "pbix_files=$pbix_file" >> $GITHUB_ENV
+          echo "Found PBIX file: $pbix_file"
 
-      $datasetsJson = pbicli dataset list --workspace $workspaceId --output json
-      $datasets = ($datasetsJson | ConvertFrom-Json).name
-      Write-Host "##[section]Datasets in workspace:"
-      if ($datasets) { $datasets | ForEach-Object { Write-Host $_ } } else { Write-Host "None" }
+      - name: Rename PBIX file (reponame-reportname.pbix)
+        run: |
+          file="${pbix_files}"
+          dir=$(dirname "$file")
+          base=$(basename "$file" .pbix)
+          new_name="${{ github.event.repository.name }}-${base}.pbix"
+          new_path="$dir/$new_name"
+          mv "$file" "$new_path"
+          echo "Renamed: $file → $new_path"
+          echo "pbix_files=$new_path" >> $GITHUB_ENV
 
-      Write-Host "##vso[task.setvariable variable=reports]$($reports -join ';')"
-      Write-Host "##vso[task.setvariable variable=datasets]$($datasets -join ';')"
-    displayName: 'List Reports and Datasets in Workspace'
+      - name: List existing reports and datasets in workspace
+        run: |
+          reports_json=$(pbicli report list --workspace "$WORKSPACE_ID" --output json)
+          reports=$(echo "$reports_json" | jq -r '.[]?.name // empty' | tr '\n' ';')
+          echo "reports=$reports" >> $GITHUB_ENV
 
-  # Step 7: Publish renamed PBIX files (CreateOrOverwrite)
-  - powershell: |
-      $pbixFiles = "$(pbixFiles)"
-      if (-not $pbixFiles) {
-        Write-Host "##[warning]No PBIX files to publish. Skipping."
-        exit 0
-      }
-      $pbixFilesArray = $pbixFiles -split ';'
-      $workspaceId = "$(workspaceId)"
-      foreach ($file in $pbixFilesArray) {
-        Write-Host "##[section]Publishing: $file"
-        pbicli import pbix -w $workspaceId --file "$file" --conflict CreateOrOverwrite
-        Write-Host "##[info]Published: $file"
-      }
-    displayName: 'Publish PBIX Files'
+          datasets_json=$(pbicli dataset list --workspace "$WORKSPACE_ID" --output json)
+          datasets=$(echo "$datasets_json" | jq -r '.[]?.name // empty' | tr '\n' ';')
+          echo "datasets=$datasets" >> $GITHUB_ENV
 
-  # Step 8: Delete orphaned reports/datasets (only those prefixed with repo name)
-  - powershell: |
-      $pbixFiles = "$(pbixFiles)"
-      $reports = "$(reports)"
-      $datasets = "$(datasets)"
-      $workspaceId = "$(workspaceId)"
-      $repoName = "$(Build.Repository.Name)"
-      $repoPrefix = "$([System.IO.Path]::GetFileNameWithoutExtension($repoName))-"
+          echo "Reports in workspace:"
+          echo "${reports:-None}" | tr ';' '\n'
+          echo "Datasets in workspace:"
+          echo "${datasets:-None}" | tr ';' '\n'
 
-      $pbixFileNames = if ($pbixFiles) { ($pbixFiles -split ';') | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) } } else { @() }
-      $reportsArray = if ($reports) { $reports -split ';' } else { @() }
-      $datasetsArray = if ($datasets) { $datasets -split ';' } else { @() }
+      - name: Publish PBIX file
+        run: |
+          echo "Publishing: $pbix_files"
+          pbicli import pbix -w "$WORKSPACE_ID" --file "$pbix_files" --conflict CreateOrOverwrite
 
-      $filteredReports = $reportsArray | Where-Object { $_.StartsWith($repoPrefix) }
-      $filteredDatasets = $datasetsArray | Where-Object { $_.StartsWith($repoPrefix) }
+      - name: Delete orphaned reports and datasets
+        run: |
+          repo_prefix="${{ github.event.repository.name }}-"
+          pbix_name=$(basename "$pbix_files" .pbix)
 
-      Write-Host "##[section]Deleting orphaned reports..."
-      foreach ($report in $filteredReports) {
-        if ($pbixFileNames -notcontains $report) {
-          Write-Host "##[info]Deleting orphaned report: $report"
-          pbicli report delete --workspace $workspaceId --report "$report"
-        }
-      }
+          # Orphaned reports
+          echo "$reports" | tr ';' '\n' | while IFS= read -r report; do
+            if [ -z "$report" ] || [[ ! "$report" == "$repo_prefix"* ]]; then continue; fi
+            if [ "$report" != "$pbix_name" ]; then
+              echo "Deleting orphaned report: $report"
+              pbicli report delete --workspace "$WORKSPACE_ID" --report "$report" || true
+            fi
+          done
 
-      Write-Host "##[section]Deleting orphaned datasets..."
-      foreach ($dataset in $filteredDatasets) {
-        if ($pbixFileNames -notcontains $dataset) {
-          Write-Host "##[info]Deleting orphaned dataset: $dataset"
-          pbicli dataset delete --workspace $workspaceId --dataset "$dataset"
-        }
-      }
-    displayName: 'Clean Up Orphaned Reports and Datasets'
+          # Orphaned datasets
+          echo "$datasets" | tr ';' '\n' | while IFS= read -r ds; do
+            if [ -z "$ds" ] || [[ ! "$ds" == "$repo_prefix"* ]]; then continue; fi
+            if [ "$ds" != "$pbix_name" ]; then
+              echo "Deleting orphaned dataset: $ds"
+              pbicli dataset delete --workspace "$WORKSPACE_ID" --dataset "$ds" || true
+            fi
+          done
 
-  # Step 9: Rebind reports (only if federated-model.txt exists)
-  - powershell: |
-      $federatedFile = ".\federated-model.txt"
-      if (-not (Test-Path $federatedFile)) {
-        Write-Host "##[warning]federated-model.txt not found. Skipping rebind."
-        exit 0
-      }
+      - name: Rebind reports (if federated-model.txt exists)
+        if: hashFiles('federated-model.txt') != ''
+        run: |
+          repo_prefix="${{ github.event.repository.name }}-"
 
-      $workspaceId = "$(workspaceId)"
-      $repoName = "$(Build.Repository.Name)"
-      $repoPrefix = "$([System.IO.Path]::GetFileNameWithoutExtension($repoName))-"
+          # Parse bindings (skip header, ignore comments)
+          mapfile -t bindings < <(tail -n +2 federated-model.txt | grep -vE '^\s*(#|$)' | grep -E '^\s*[^:]+:[^:]+$')
 
-      $bindings = Get-Content $federatedFile -ErrorAction SilentlyContinue |
-                  Select-Object -Skip 1 |
-                  Where-Object { $_ -match "^\s*[^#]" -and $_ -match "^(.+?)\s*:\s*(.+)$" } |
-                  ForEach-Object {
-                    [PSCustomObject]@{
-                      Report  = $matches[1].Trim()
-                      Dataset = $matches[2].Trim()
-                    }
-                  }
+          # Build dataset name → id map
+          declare -A dataset_map
+          while IFS= read -r line; do
+            name=$(echo "$line" | jq -r '.name')
+            id=$(echo "$line" | jq -r '.id')
+            dataset_map["$name"]="$id"
+          done < <(pbicli dataset list --workspace "$WORKSPACE_ID" --output json | jq -c '.[]')
 
-      $datasetsJson = pbicli dataset list --workspace $workspaceId --output json
-      $datasetDict = @{}
-      ($datasetsJson | ConvertFrom-Json) | ForEach-Object { $datasetDict[$_.name] = $_.id }
+          for line in "${bindings[@]}"; do
+            report_raw=$(echo "$line" | cut -d':' -f1 | xargs)
+            dataset_raw=$(echo "$line" | cut -d':' -f2- | xargs)
+            report_name="${repo_prefix}${report_raw}"
+            dataset_name="${repo_prefix}${dataset_raw}"
 
-      foreach ($binding in $bindings) {
-        $reportName  = $repoPrefix + $binding.Report
-        $datasetName = $repoPrefix + $binding.Dataset
+            if [ -z "${dataset_map[$dataset_name]}" ]; then
+              echo "Error: Dataset '$dataset_name' not found. Skipping rebind."
+              continue
+            fi
 
-        if (-not $datasetDict.ContainsKey($datasetName)) {
-          Write-Host "##[error]Dataset '$datasetName' not found. Skipping rebind for '$reportName'."
-          continue
-        }
-
-        $datasetId = $datasetDict[$datasetName]
-        Write-Host "##[info]Rebinding '$reportName' → '$datasetName' (ID: $datasetId)"
-        pbicli report rebind --workspace $workspaceId --report "$reportName" --target-dataset $datasetId
-      }
-    displayName: 'Rebind Reports from federated-model.txt'
+            dataset_id="${dataset_map[$dataset_name]}"
+            echo "Rebinding '$report_name' → '$dataset_name' (ID: $dataset_id)"
+            pbicli report rebind --workspace "$WORKSPACE_ID" --report "$report_name" --target-dataset "$dataset_id" || echo "Rebind failed (may already be bound)"
+          done
