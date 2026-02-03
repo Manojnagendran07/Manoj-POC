@@ -1,0 +1,56 @@
+name: CI / Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login  # Remove if not needed; this is for Azure auth if your deployment requires it
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          client-secret: ${{ secrets.CLIENT_SECRET }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+
+      - name: Set Workspace ID
+        run: |
+          if [ "${{ github.ref_name }}" == "main" ]; then
+            WORKSPACE_ID=${{ secrets.PRODWORKSPACEID }}  # Use prod secret for main
+            echo "Using Production Workspace ID"
+          else
+            WORKSPACE_ID=${{ secrets.DEVWORKSPACEID }}  # Use dev secret for other branches
+            echo "Using Dev Workspace ID"
+          fi
+          echo "WORKSPACE_ID=$WORKSPACE_ID" >> $GITHUB_ENV  # Make it available to later steps
+
+      # Add your actual build, test, deploy steps here
+      - name: Build
+        run: |
+          echo "Building for branch: ${{ github.ref_name }}"
+          # Your build commands, e.g., npm build or whatever your project uses
+
+      - name: Test
+        run: |
+          echo "Running tests..."
+          # Your test commands, e.g., npm test
+
+      - name: Deploy
+        run: |
+          echo "Deploying to ${{ github.ref_name == 'main' && 'Production' || 'Dev/Staging' }} with Workspace ID: $WORKSPACE_ID"
+          # Your deployment commands, e.g.:
+          # az deployment group create --resource-group myGroup --template-file template.json --parameters workspaceId=$WORKSPACE_ID
+          # Adapt based on your tool (Azure DevOps, Power Apps, etc.)
