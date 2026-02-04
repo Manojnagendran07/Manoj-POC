@@ -35,7 +35,7 @@ jobs:
         id: set-workspace
         run: |
           # Production Workspace ID
-          $workspaceId = "6283f46e-a6c4-455f-81aa-c3ca7f2717a4"
+          $workspaceId = "70610589-66d2-47cb-9aab-34e7624e7d28"
 
           if (-not $workspaceId) {
             Write-Error "Production workspace ID is not set"
